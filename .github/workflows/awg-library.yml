@@ -1,4 +1,4 @@
-name: PANDORA AWG library qualification v1
+name: PANDORA AWG library qualification v2
 on:
   workflow_dispatch:
     inputs:
@@ -15,7 +15,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: pandora-awg-library-v1
+  group: pandora-awg-library-v2
   cancel-in-progress: false
 jobs:
   library:
@@ -77,6 +77,30 @@ jobs:
           "$SDKMANAGER" --sdk_root="$ANDROID_HOME" 'platforms;android-36' 'build-tools;35.0.0' 'ndk;26.1.10909125' 'cmake;3.22.1'
           "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --list_installed > "$WORK/artifacts/sdk-packages.txt"
           test "$(df -Pk "$WORK" | awk 'NR==2 {print $4}')" -ge 2097152
+      - name: Apply exact build-toolchain compatibility correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORK/source"
+          printf '%s  %s\n' '411cd58cfa642e28b1ab6f25d3cabee1076be4874c6b2c85885c90e7b6f2a6a9' 'tunnel/tools/libwg-go/Makefile' | sha256sum --check --strict
+          printf '%s  %s\n' 'cde303cebd847b122373b4d714645b8480d48283570ab9b0bc6540c364724a16' 'tunnel/tools/libwg-go/go.mod' | sha256sum --check --strict
+          printf '%s  %s\n' '149ab7d9a1c20dad61fe279a837e0e0c81c6b2f5584614ac4d4cde67008755f0' 'tunnel/tools/libwg-go/goruntime-boottime-over-monotonic.diff' | sha256sum --check --strict
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tunnel/tools/libwg-go/Makefile')
+          text = p.read_text()
+          changes = {
+              'GO_VERSION := 1.24.2': 'GO_VERSION := 1.26.10',
+              'GO_HASH_linux-amd64 := 68097bd680839cbc9d464a0edce4f7c333975e27a90246890e9f1078c7e702ad': 'GO_HASH_linux-amd64 := ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5',
+          }
+          for before, after in changes.items():
+              if text.count(before) != 1:
+                  raise SystemExit('BUILD_TOOLCHAIN_SOURCE_MISMATCH')
+              text = text.replace(before, after)
+          p.write_text(text)
+          PY
+          git diff --exit-code -- tunnel/tools/libwg-go/go.mod tunnel/tools/libwg-go/goruntime-boottime-over-monotonic.diff
+          git diff -- tunnel/tools/libwg-go/Makefile > "$WORK/artifacts/go-toolchain-change.diff"
       - name: Build only the unsigned library
         shell: bash
         run: |
