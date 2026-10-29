@@ -1,0 +1,206 @@
+{
+  "kind": "PUBLIC_DERIVATIVE_CI_SOURCE_LOCK",
+  "sourceReview": "READY_FOR_CI_REVIEW_NOT_RUNTIME_QUALIFIED",
+  "commits": {
+    "amneziawg-android": "5c16489e2cd9ed3a0a7a27c7445bba5238132f86",
+    "amneziawg-go": "1b86b2ae0e493e7ea93f8c1a0f0cb6735b1551f1"
+  },
+  "baseline": [
+    {
+      "repo": "amneziawg-android",
+      "path": "tunnel/tools/libwg-go/api-android.go",
+      "sha256": "34bd3f4824c267b89f50f3306a6872d5464b058f22ccfe1d40a5cbd87d0ea86b",
+      "url": "https://raw.githubusercontent.com/amnezia-vpn/amneziawg-android/5c16489e2cd9ed3a0a7a27c7445bba5238132f86/tunnel/tools/libwg-go/api-android.go"
+    },
+    {
+      "repo": "amneziawg-android",
+      "path": "tunnel/tools/libwg-go/go.mod",
+      "sha256": "cde303cebd847b122373b4d714645b8480d48283570ab9b0bc6540c364724a16",
+      "url": "https://raw.githubusercontent.com/amnezia-vpn/amneziawg-android/5c16489e2cd9ed3a0a7a27c7445bba5238132f86/tunnel/tools/libwg-go/go.mod"
+    },
+    {
+      "repo": "amneziawg-android",
+      "path": "tunnel/tools/libwg-go/jni.c",
+      "sha256": "640682de14205ad1b9b1909bd04c0a4c449cf59ffe2e6c7f45c57a9c3a827edd",
+      "url": "https://raw.githubusercontent.com/amnezia-vpn/amneziawg-android/5c16489e2cd9ed3a0a7a27c7445bba5238132f86/tunnel/tools/libwg-go/jni.c"
+    },
+    {
+      "repo": "amneziawg-go",
+      "path": "conn/bind_std.go",
+      "sha256": "355c091c7b1da67e3eca7ff6044ecfdbca9d90d0fc8c65af1fd821eac8f2ba53",
+      "url": "https://raw.githubusercontent.com/amnezia-vpn/amneziawg-go/1b86b2ae0e493e7ea93f8c1a0f0cb6735b1551f1/conn/bind_std.go"
+    },
+    {
+      "repo": "amneziawg-go",
+      "path": "conn/controlfns.go",
+      "sha256": "5df50e54427e9521b7ba99716d865a8f8e14e8315f2c0bea809942aa7b515d24",
+      "url": "https://raw.githubusercontent.com/amnezia-vpn/amneziawg-go/1b86b2ae0e493e7ea93f8c1a0f0cb6735b1551f1/conn/controlfns.go"
+    },
+    {
+      "repo": "amneziawg-go",
+      "path": "device/device.go",
+      "sha256": "6d013e27d6b33c1ecaae1a1fbc4999e15a3a11252e302c580ea0f9027fa3ec21",
+      "url": "https://raw.githubusercontent.com/amnezia-vpn/amneziawg-go/1b86b2ae0e493e7ea93f8c1a0f0cb6735b1551f1/device/device.go"
+    },
+    {
+      "repo": "amneziawg-go",
+      "path": "tun/tun_linux.go",
+      "sha256": "6bc1182438d89c2f11fb82295de55f64822c356ed614ba8fb329115793bdbe6a",
+      "url": "https://raw.githubusercontent.com/amnezia-vpn/amneziawg-go/1b86b2ae0e493e7ea93f8c1a0f0cb6735b1551f1/tun/tun_linux.go"
+    },
+    {
+      "repo": "amneziawg-android",
+      "path": "tunnel/build.gradle.kts",
+      "sha256": "f053633a9b23024a43db460799ddb698d26fd1592fb40329e53142f9385f29ce",
+      "url": "https://raw.githubusercontent.com/amnezia-vpn/amneziawg-android/5c16489e2cd9ed3a0a7a27c7445bba5238132f86/tunnel/build.gradle.kts"
+    }
+  ],
+  "candidate": [
+    {
+      "repo": "amneziawg-android",
+      "path": "tunnel/build.gradle.kts",
+      "sha256": "b3bd8f9af8238c30f5837015c4a16a0862405bda1e3fc6f15ac3a03fb77b15ad"
+    },
+    {
+      "repo": "amneziawg-android",
+      "path": "tunnel/pandora-native-consumer-rules.pro",
+      "sha256": "f9a7ef8eae584e86679ed4f4febe940ea02decafdd51ffda9d8f342ba2136b3e"
+    },
+    {
+      "repo": "amneziawg-android",
+      "path": "tunnel/src/main/java/org/pandora/nativebridge/ProtectedAwgNative.java",
+      "sha256": "8914c3b2f6b6c61d8a65fedc37d9a4b0fdabdafb972ca93a76d0aed82cf18955"
+    },
+    {
+      "repo": "amneziawg-android",
+      "path": "tunnel/tools/libwg-go/api-android.go",
+      "sha256": "76c37ece7c27f330dcbb02ecf6c7063a75bb74e74d6a9d7a8bb4314caf19cb44"
+    },
+    {
+      "repo": "amneziawg-android",
+      "path": "tunnel/tools/libwg-go/go.mod",
+      "sha256": "67a55130810d44746a37f43f86c297886b9ad5c931f408ecd4fa2ac5a763c071"
+    },
+    {
+      "repo": "amneziawg-android",
+      "path": "tunnel/tools/libwg-go/jni.c",
+      "sha256": "640682de14205ad1b9b1909bd04c0a4c449cf59ffe2e6c7f45c57a9c3a827edd"
+    },
+    {
+      "repo": "amneziawg-android",
+      "path": "tunnel/tools/libwg-go/pandora-protected_test.go",
+      "sha256": "e0e1cc65b37421a7dad25bcf83af0ff4f1433a8368b7eb043d3d7db0a8bd1436"
+    },
+    {
+      "repo": "amneziawg-android",
+      "path": "tunnel/tools/libwg-go/pandora-protected-jni.c",
+      "sha256": "1b03e83101096def1ad20e0f76711337654adf704781f3ebc52c403c4b6f6d39"
+    },
+    {
+      "repo": "amneziawg-android",
+      "path": "tunnel/tools/libwg-go/pandora-protected.go",
+      "sha256": "ba25390696b25fc6878d471f89156388ac9029a6d8e197bfcfbb221c363fecf5"
+    },
+    {
+      "repo": "amneziawg-go",
+      "path": "conn/bind_std.go",
+      "sha256": "58a3be4e405cddcff6f1e1728cb465d17f1cc27cbd31c23927e56f80e261cb0c"
+    },
+    {
+      "repo": "amneziawg-go",
+      "path": "conn/controlfns.go",
+      "sha256": "5df50e54427e9521b7ba99716d865a8f8e14e8315f2c0bea809942aa7b515d24"
+    },
+    {
+      "repo": "amneziawg-go",
+      "path": "conn/protected_bind_test.go",
+      "sha256": "f174a4ceebb3627213d49ff74f8a5462f35c8e5698a06c647584a96588dbd62d"
+    },
+    {
+      "repo": "amneziawg-go",
+      "path": "conn/protected_bind.go",
+      "sha256": "88b5bbe053db27b9cc3e87072a98a367d724db76804bc0bfffaef364c9337bdb"
+    },
+    {
+      "repo": "amneziawg-go",
+      "path": "device/device.go",
+      "sha256": "6d013e27d6b33c1ecaae1a1fbc4999e15a3a11252e302c580ea0f9027fa3ec21"
+    },
+    {
+      "repo": "amneziawg-go",
+      "path": "tun/tun_linux.go",
+      "sha256": "6bc1182438d89c2f11fb82295de55f64822c356ed614ba8fb329115793bdbe6a"
+    },
+    {
+      "repo": "amneziawg-go",
+      "path": "tun/tun_owned_linux_test.go",
+      "sha256": "c35c363a682ea121af180c7f5f1898c2513d6c2d6e001cd856a33804619683f8"
+    },
+    {
+      "repo": "amneziawg-go",
+      "path": "tun/tun_owned_linux.go",
+      "sha256": "2b441fb22faf94e035567b856c1812adb5529f5f621f3e01c8567266daedcf61"
+    }
+  ],
+  "patches": [
+    {
+      "repo": "amneziawg-android",
+      "file": "patches/amneziawg-android.patch",
+      "sha256": "1558bce3fe1ef33bdf4b74e720769ff49deaae834da274ce118e30ed0d4a2e6c"
+    },
+    {
+      "repo": "amneziawg-go",
+      "file": "patches/amneziawg-go.patch",
+      "sha256": "7218fff4d423435d6e81ccc37ec1b5661bca90dbfd662d96a994a88a3c7c17c6"
+    }
+  ],
+  "linuxTests": [
+    {
+      "package": "github.com/amnezia-vpn/amneziawg-go/v3/conn",
+      "tests": [
+        "TestProtectedBindMissingCallback",
+        "TestSocketControlOrderAndPerInstance",
+        "TestProtectionErrorCannotMasqueradeAsOptionalFamily",
+        "TestBindProtectFailureLeavesNoSockets",
+        "TestBindReopenProtectsAgain",
+        "TestSecondFamilyProtectFailureClosesFirst",
+        "TestBindCloseFailureSurvivesSecondClose"
+      ]
+    },
+    {
+      "package": "github.com/amnezia-vpn/amneziawg-go/v3/tun",
+      "tests": [
+        "TestOwnedTUNFailureClosesDuplicateNotOwner"
+      ]
+    }
+  ],
+  "javaMethods": [
+    "beginAsync(",
+    "status(",
+    "requestStop(",
+    "awaitStop(",
+    "releaseStopped("
+  ],
+  "jniExports": [
+    "Java_org_pandora_nativebridge_ProtectedAwgNative_nativeBegin",
+    "Java_org_pandora_nativebridge_ProtectedAwgNative_nativeStatus",
+    "Java_org_pandora_nativebridge_ProtectedAwgNative_nativeRequestStop",
+    "Java_org_pandora_nativebridge_ProtectedAwgNative_nativeReleaseStopped"
+  ],
+  "jniDescriptors": {
+    "nativeBegin": "(ILjava/lang/String;Lorg/pandora/nativebridge/ProtectedAwgNative$SocketProtector;)J",
+    "nativeStatus": "(J)J",
+    "nativeRequestStop": "(J)V",
+    "nativeReleaseStopped": "(J)Z"
+  },
+  "consumerRules": [
+    "-keep class org.pandora.nativebridge.ProtectedAwgNative { *; }",
+    "-keep interface org.pandora.nativebridge.ProtectedAwgNative$SocketProtector { *; }",
+    "-keepclassmembers class * implements org.pandora.nativebridge.ProtectedAwgNative$SocketProtector {",
+    "    public boolean protect(int);",
+    "}"
+  ],
+  "reviewedGoSha256": "ba25390696b25fc6878d471f89156388ac9029a6d8e197bfcfbb221c363fecf5",
+  "androidCgoRuntime": "NOT_RUN",
+  "phone": "NOT_RUN"
+}
