@@ -1,0 +1,185 @@
+name: PANDORA protected AWG candidate qualification v1
+on:
+  workflow_dispatch:
+    inputs:
+      sdk_terms_accepted:
+        description: Administrator has reviewed and accepted the Android SDK terms for this run
+        required: true
+        type: boolean
+        default: false
+      free_budget_confirmed:
+        description: Free Actions allowance and zero paid spending have been confirmed
+        required: true
+        type: boolean
+        default: false
+      public_patch_reviewed:
+        description: Administrator approves this exact reviewed public derivative patch commit
+        required: true
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: pandora-protected-awg-candidate-v1
+  cancel-in-progress: false
+jobs:
+  library:
+    if: ${{ inputs.sdk_terms_accepted && inputs.free_budget_confirmed && inputs.public_patch_reviewed }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GOTOOLCHAIN: local
+      CANDIDATE_LOCK_SHA256: 82ff2d9416fdad155c893964e75181dde9178447c277d830c83d1fcc5c16e715
+      SOURCE_COMMIT: 5c16489e2cd9ed3a0a7a27c7445bba5238132f86
+      JDK_URL: https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.13%2B9/OpenJDK21U-jdk_x64_linux_hotspot_21.0.13_9.tar.gz
+      JDK_SHA256: d7f5d5cf865a2902b70ff549b97586a7d3f234e016f041ab447ea740c7d66d1c
+      SDK_URL: https://dl.google.com/android/repository/commandlinetools-linux-15859902_latest.zip
+      SDK_SHA256: 4e4c464f145a7512b57d088ac6c278c03c9eea610886b35a5e0804e74eedf583
+      GRADLE_SHA256: 20f1b1176237254a6fc204d8434196fa11a4cfb387567519c61556e8710aed78
+    steps:
+      - name: Prepare isolated directories and public source
+        shell: bash
+        run: |
+          set -euo pipefail
+          for tool in git curl tar unzip sha256sum make flock patch cc; do command -v "$tool" >/dev/null; done
+          test "$(uname -m)" = x86_64
+          # CI-only qualification budget; not the separate Windows tool estimate or NAS limits.
+          test "$(df -Pk "$RUNNER_TEMP" | awk 'NR==2 {print $4}')" -ge 12582912
+          WORK="$RUNNER_TEMP/pandora-protected-awg-v1"
+          test ! -e "$WORK"
+          mkdir -m 700 "$WORK"
+          mkdir "$WORK/downloads" "$WORK/jdk" "$WORK/sdk" "$WORK/sdk/cmdline-tools" "$WORK/gradle-cache" "$WORK/artifacts"
+          printf 'WORK=%s\nJAVA_HOME=%s\nANDROID_HOME=%s\nANDROID_SDK_ROOT=%s\nGRADLE_USER_HOME=%s\n' "$WORK" "$WORK/jdk" "$WORK/sdk" "$WORK/sdk" "$WORK/gradle-cache" >> "$GITHUB_ENV"
+          git init "$WORK/source"
+          git -C "$WORK/source" remote add origin https://github.com/amnezia-vpn/amneziawg-android.git
+          git -C "$WORK/source" fetch --depth=1 origin "$SOURCE_COMMIT"
+          git -C "$WORK/source" checkout --detach FETCH_HEAD
+          test "$(git -C "$WORK/source" rev-parse HEAD)" = "$SOURCE_COMMIT"
+          git -C "$WORK/source" -c protocol.file.allow=never submodule update --init --recursive
+          git -C "$WORK/source" submodule status --recursive > "$WORK/artifacts/submodules.txt"
+          if grep -Eq '^[-+U]' "$WORK/artifacts/submodules.txt"; then exit 1; fi
+      - name: Verify bootstrap archives before use
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --proto '=https' --tlsv1.2 "$JDK_URL" -o "$WORK/downloads/jdk.tar.gz"
+          printf '%s  %s\n' "$JDK_SHA256" "$WORK/downloads/jdk.tar.gz" | sha256sum --check --strict
+          tar -xzf "$WORK/downloads/jdk.tar.gz" -C "$JAVA_HOME" --strip-components=1
+          curl --fail --location --proto '=https' --tlsv1.2 "$SDK_URL" -o "$WORK/downloads/sdk.zip"
+          printf '%s  %s\n' "$SDK_SHA256" "$WORK/downloads/sdk.zip" | sha256sum --check --strict
+          unzip -q "$WORK/downloads/sdk.zip" -d "$WORK/sdk-unpack"
+          mv "$WORK/sdk-unpack/cmdline-tools" "$ANDROID_HOME/cmdline-tools/22.0"
+          "$JAVA_HOME/bin/java" -version
+          grep -Eq '^JAVA_VERSION="21\.0\.13"' "$JAVA_HOME/release"
+          grep -Eq '^Pkg.Revision=22\.0(\.0)?$' "$ANDROID_HOME/cmdline-tools/22.0/source.properties"
+          printf 'PATH=%s/bin:%s\n' "$JAVA_HOME" "$PATH" >> "$GITHUB_ENV"
+      - name: Install only approved SDK packages in the ephemeral workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/22.0/bin/sdkmanager"
+          # These answers are permitted only by the explicit administrator input above.
+          for unused in $(seq 1 100); do printf 'y\n'; done | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses
+          "$SDKMANAGER" --sdk_root="$ANDROID_HOME" 'platforms;android-36' 'build-tools;35.0.0' 'ndk;26.1.10909125' 'cmake;3.22.1'
+          "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --list_installed > "$WORK/artifacts/sdk-packages.txt"
+          test "$(df -Pk "$WORK" | awk 'NR==2 {print $4}')" -ge 2097152
+      - name: Apply exact build-toolchain compatibility correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORK/source"
+          printf '%s  %s\n' '411cd58cfa642e28b1ab6f25d3cabee1076be4874c6b2c85885c90e7b6f2a6a9' 'tunnel/tools/libwg-go/Makefile' | sha256sum --check --strict
+          printf '%s  %s\n' 'cde303cebd847b122373b4d714645b8480d48283570ab9b0bc6540c364724a16' 'tunnel/tools/libwg-go/go.mod' | sha256sum --check --strict
+          printf '%s  %s\n' '149ab7d9a1c20dad61fe279a837e0e0c81c6b2f5584614ac4d4cde67008755f0' 'tunnel/tools/libwg-go/goruntime-boottime-over-monotonic.diff' | sha256sum --check --strict
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tunnel/tools/libwg-go/Makefile')
+          text = p.read_text()
+          changes = {
+              'GO_VERSION := 1.24.2': 'GO_VERSION := 1.26.10',
+              'GO_HASH_linux-amd64 := 68097bd680839cbc9d464a0edce4f7c333975e27a90246890e9f1078c7e702ad': 'GO_HASH_linux-amd64 := ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5',
+          }
+          for before, after in changes.items():
+              if text.count(before) != 1:
+                  raise SystemExit('BUILD_TOOLCHAIN_SOURCE_MISMATCH')
+              text = text.replace(before, after)
+          p.write_text(text)
+          PY
+          git diff --exit-code -- tunnel/tools/libwg-go/go.mod tunnel/tools/libwg-go/goruntime-boottime-over-monotonic.diff
+          git diff -- tunnel/tools/libwg-go/Makefile > "$WORK/artifacts/go-toolchain-change.diff"
+      - name: Fetch reviewed public payload and exact Go source; apply the new patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = ivan0915102060-hub/pandora2-native-build
+          git init "$WORK/payload"
+          git -C "$WORK/payload" remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git -C "$WORK/payload" fetch --depth=1 origin "$GITHUB_SHA"
+          git -C "$WORK/payload" checkout --detach FETCH_HEAD
+          test "$(git -C "$WORK/payload" rev-parse HEAD)" = "$GITHUB_SHA"
+          printf '%s  %s\n' "$CANDIDATE_LOCK_SHA256" "$WORK/payload/ci/source-lock.json" | sha256sum --check --strict
+          test "$(git -C "$WORK/source/tunnel/tools/amneziawg-tools" rev-parse HEAD)" = ee0f0a9aa34ff0a0da4b3433b9512781cfe02843
+          test "$(git -C "$WORK/source/tunnel/tools/elf-cleaner" rev-parse HEAD)" = 7efc05090675ec6161b7def862728086a26c3b1f
+          git init "$WORK/amneziawg-go"
+          git -C "$WORK/amneziawg-go" remote add origin https://github.com/amnezia-vpn/amneziawg-go.git
+          git -C "$WORK/amneziawg-go" fetch --depth=1 origin 1b86b2ae0e493e7ea93f8c1a0f0cb6735b1551f1
+          git -C "$WORK/amneziawg-go" checkout --detach FETCH_HEAD
+          python3 "$WORK/payload/ci/apply_candidate.py" --work "$WORK" --payload "$WORK/payload"
+          cp "$WORK/payload/ci/source-lock.json" "$WORK/artifacts/source-lock.json"
+          cp "$WORK/payload/patches/"*.patch "$WORK/artifacts/"
+      - name: Verify exact local Go module and run only new Linux conn and tun tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --proto '=https' --tlsv1.2 https://go.dev/dl/go1.26.10.linux-amd64.tar.gz -o "$WORK/downloads/go-local.tar.gz"
+          printf '%s  %s\n' ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5 "$WORK/downloads/go-local.tar.gz" | sha256sum --check --strict
+          tar -xzf "$WORK/downloads/go-local.tar.gz" -C "$WORK"
+          export PATH="$WORK/go/bin:$JAVA_HOME/bin:$PATH"
+          export GOPATH="$WORK/gopath" GOMODCACHE="$WORK/gomodcache" GOCACHE="$WORK/gocache" GOWORK=off
+          test "$(go version)" = "go version go1.26.10 linux/amd64"
+          cd "$WORK/source/tunnel/tools/libwg-go"
+          go list -m -json github.com/amnezia-vpn/amneziawg-go/v3 > "$WORK/artifacts/go-module-resolve.json"
+          python3 - <<'PY'
+          import json,os
+          from pathlib import Path
+          m=json.loads((Path(os.environ['WORK'])/'artifacts/go-module-resolve.json').read_text())
+          expected=(Path(os.environ['WORK'])/'amneziawg-go').resolve()
+          assert Path(m['Dir']).resolve()==expected
+          assert Path(m['Replace']['Dir']).resolve()==expected
+          assert m['Replace']['Path']=='../../../../amneziawg-go'
+          assert Path(m['GoMod']).resolve()==expected/'go.mod'
+          PY
+          cd "$WORK/amneziawg-go"
+          go test -json -count=1 ./conn ./tun -run '^(TestProtectedBindMissingCallback|TestSocketControlOrderAndPerInstance|TestProtectionErrorCannotMasqueradeAsOptionalFamily|TestBindProtectFailureLeavesNoSockets|TestBindReopenProtectsAgain|TestSecondFamilyProtectFailureClosesFirst|TestBindCloseFailureSurvivesSecondClose|TestOwnedTUNFailureClosesDuplicateNotOwner)$' > "$WORK/artifacts/go-local-tests.json"
+          python3 "$WORK/payload/ci/verify_go_results.py" "$WORK/payload/ci/source-lock.json" "$WORK/artifacts/go-local-tests.json"
+          go version > "$WORK/artifacts/go-local-version.txt"
+      - name: Build only the unsigned library
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORK/source"
+          grep -Fq 'gradle-8.13-bin.zip' gradle/wrapper/gradle-wrapper.properties
+          printf '\ndistributionSha256Sum=%s\n' "$GRADLE_SHA256" >> gradle/wrapper/gradle-wrapper.properties
+          chmod u+x gradlew
+          ./gradlew --no-daemon --max-workers=2 '-Dorg.gradle.jvmargs=-Xmx1536m' :tunnel:assembleRelease
+          test -f tunnel/build/outputs/aar/tunnel-release.aar
+          cp tunnel/build/outputs/aar/tunnel-release.aar "$WORK/artifacts/awg-tunnel-protected-v2-candidate.aar"
+          python3 "$WORK/payload/ci/verify_artifact.py" --aar "$WORK/artifacts/awg-tunnel-protected-v2-candidate.aar" --lock "$WORK/payload/ci/source-lock.json" --out "$WORK/artifacts/static-review"
+          cp COPYING "$WORK/artifacts/SOURCE-COPYING"
+          cp "$WORK/amneziawg-go/LICENSE" "$WORK/artifacts/GO-LICENSE"
+          printf 'source_commit=%s\nqualification_only=true\nformal_secrets_used=false\n' "$SOURCE_COMMIT" > "$WORK/artifacts/build-scope.txt"
+          "$JAVA_HOME/bin/java" -version 2> "$WORK/artifacts/java-version.txt"
+          ./gradlew --no-daemon --version > "$WORK/artifacts/gradle-version.txt"
+          git diff -- gradle/wrapper/gradle-wrapper.properties > "$WORK/artifacts/wrapper-checksum-change.diff"
+          cd "$WORK/artifacts"
+          find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
+      - name: Upload only the isolated library and public build evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pandora-protected-awg-qualification-v1
+          path: ${{ env.WORK }}/artifacts/
+          if-no-files-found: error
+          retention-days: 1
+
+
