@@ -1,0 +1,701 @@
+diff --git a/baseline/amneziawg-android/tunnel/build.gradle.kts b/candidate/amneziawg-android/tunnel/build.gradle.kts
+index 1dee646..775a771 100644
+--- a/baseline/amneziawg-android/tunnel/build.gradle.kts
++++ b/candidate/amneziawg-android/tunnel/build.gradle.kts
+@@ -10,6 +10,9 @@ plugins {
+ }
+ 
+ android {
++    defaultConfig {
++        consumerProguardFiles("pandora-native-consumer-rules.pro")
++    }
+     compileOptions {
+         sourceCompatibility = JavaVersion.VERSION_17
+         targetCompatibility = JavaVersion.VERSION_17
+diff --git a/candidate/amneziawg-android/tunnel/pandora-native-consumer-rules.pro b/candidate/amneziawg-android/tunnel/pandora-native-consumer-rules.pro
+new file mode 100644
+index 0000000..b291d21
+--- /dev/null
++++ b/candidate/amneziawg-android/tunnel/pandora-native-consumer-rules.pro
+@@ -0,0 +1,7 @@
++# JNI uses fixed class/native method names and GetMethodID("protect", "(I)Z").
++# B owns these consumer rules; qualified final app must verify merged rules.
++-keep class org.pandora.nativebridge.ProtectedAwgNative { *; }
++-keep interface org.pandora.nativebridge.ProtectedAwgNative$SocketProtector { *; }
++-keepclassmembers class * implements org.pandora.nativebridge.ProtectedAwgNative$SocketProtector {
++    public boolean protect(int);
++}
+diff --git a/candidate/amneziawg-android/tunnel/src/main/java/org/pandora/nativebridge/ProtectedAwgNative.java b/candidate/amneziawg-android/tunnel/src/main/java/org/pandora/nativebridge/ProtectedAwgNative.java
+new file mode 100644
+index 0000000..3578cf6
+--- /dev/null
++++ b/candidate/amneziawg-android/tunnel/src/main/java/org/pandora/nativebridge/ProtectedAwgNative.java
+@@ -0,0 +1,59 @@
++/* SPDX-License-Identifier: Apache-2.0 */
++package org.pandora.nativebridge;
++
++/** Candidate adapter API, not the stock GoBackend and not qualified Android protection. */
++public final class ProtectedAwgNative {
++    public static final int UNKNOWN = 0, STARTING = 1, RUNNING = 2, STOPPING = 3, STOPPED = 4;
++    private static final long MAX_STOP_WAIT_MS = 5000;
++    private ProtectedAwgNative() {}
++
++    public interface SocketProtector {
++        // Borrowed FD in this JNI process; no retention/close/reentry.
++        // Cross-process implementations must transfer a real PFD and enforce
++        // their own bounded RPC. Never pass a naked fd integer remotely.
++        boolean protect(int borrowedSocketFd);
++    }
++
++    // Caller loads the audited native artifact first; no stock fallback.
++    // borrows the current-process TUN FD, synchronously duplicates it natively.
++    // token=0 means NOT accepted. Positive token means pending, NOT connected.
++    public static long beginAsync(int borrowedTunFd, String settings, SocketProtector protector) {
++        if (borrowedTunFd < 0 || settings == null || protector == null) return 0;
++        if (settings.length() > 262144) return 0;
++        for (int i = 0; i < settings.length(); i++) {
++            char ch = settings.charAt(i);
++            if (ch > 127 || (ch < 32 && ch != '\n' && ch != '\r' && ch != '\t')) return 0;
++        }
++        return nativeBegin(borrowedTunFd, settings, protector);
++    }
++    public static long status(long token) { return nativeStatus(token); }
++    public static int state(long status) { return (int)(status >>> 32); }
++    public static int reason(long status) { return (int)status; }
++    public static void requestStop(long token) { nativeRequestStop(token); }
++
++    /** Bounded caller-side wait. UNKNOWN never frees native refs or owner TUN. */
++    public static long awaitStop(long token, long timeoutMs) {
++        if (token <= 0 || timeoutMs <= 0 || timeoutMs > MAX_STOP_WAIT_MS) return 0;
++        final long deadline = System.nanoTime() + timeoutMs * 1_000_000L;
++        nativeRequestStop(token);
++        for (;;) {
++            long value = nativeStatus(token);
++            if (state(value) == STOPPED) return value;
++            long remaining = deadline - System.nanoTime();
++            if (remaining <= 0) return 0; // Timed out: reserved context remains alive.
++            try {
++                Thread.sleep(Math.max(1, Math.min(10, remaining / 1_000_000L)));
++            } catch (InterruptedException interrupted) {
++                Thread.currentThread().interrupt();
++                return 0;
++            }
++        }
++    }
++    // Explicit only after STOPPED. False means context is still reserved.
++    public static boolean releaseStopped(long token) { return nativeReleaseStopped(token); }
++
++    private static native long nativeBegin(int tunFd, String settings, SocketProtector protector);
++    private static native long nativeStatus(long token);
++    private static native void nativeRequestStop(long token);
++    private static native boolean nativeReleaseStopped(long token);
++}
+diff --git a/baseline/amneziawg-android/tunnel/tools/libwg-go/api-android.go b/candidate/amneziawg-android/tunnel/tools/libwg-go/api-android.go
+index 3af343d..b0652e2 100644
+--- a/baseline/amneziawg-android/tunnel/tools/libwg-go/api-android.go
++++ b/candidate/amneziawg-android/tunnel/tools/libwg-go/api-android.go
+@@ -92,7 +92,7 @@ func awgTurnOn(interfaceName string, tunFd int32, settings string) int32 {
+ 
+ 	err = device.IpcSet(settings)
+ 	if err != nil {
+-		unix.Close(int(tunFd))
++		device.Close()
+ 		logger.Errorf("IpcSet: %v", err)
+ 		return -1
+ 	}
+@@ -124,7 +124,11 @@ func awgTurnOn(interfaceName string, tunFd int32, settings string) int32 {
+ 	err = device.Up()
+ 	if err != nil {
+ 		logger.Errorf("Unable to bring up device: %v", err)
+-		uapiFile.Close()
++		if uapi != nil {
++			uapi.Close()
++		} else if uapiFile != nil {
++			uapiFile.Close()
++		}
+ 		device.Close()
+ 		return -1
+ 	}
+@@ -138,7 +142,11 @@ func awgTurnOn(interfaceName string, tunFd int32, settings string) int32 {
+ 	}
+ 	if i == math.MaxInt32 {
+ 		logger.Errorf("Unable to find empty handle")
+-		uapiFile.Close()
++		if uapi != nil {
++			uapi.Close()
++		} else if uapiFile != nil {
++			uapiFile.Close()
++		}
+ 		device.Close()
+ 		return -1
+ 	}
+diff --git a/baseline/amneziawg-android/tunnel/tools/libwg-go/go.mod b/candidate/amneziawg-android/tunnel/tools/libwg-go/go.mod
+index 2767d53..d1450ca 100644
+--- a/baseline/amneziawg-android/tunnel/tools/libwg-go/go.mod
++++ b/candidate/amneziawg-android/tunnel/tools/libwg-go/go.mod
+@@ -10,3 +10,6 @@ require (
+ 	golang.org/x/net v0.44.0 // indirect
+ 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
+ )
++
++// PANDORA review candidate: exact sibling patched checkout, not a remote latest module.
++replace github.com/amnezia-vpn/amneziawg-go/v3 => ../../../../amneziawg-go
+diff --git a/candidate/amneziawg-android/tunnel/tools/libwg-go/pandora-protected-jni.c b/candidate/amneziawg-android/tunnel/tools/libwg-go/pandora-protected-jni.c
+new file mode 100644
+index 0000000..8c64ab6
+--- /dev/null
++++ b/candidate/amneziawg-android/tunnel/tools/libwg-go/pandora-protected-jni.c
+@@ -0,0 +1,159 @@
++/* SPDX-License-Identifier: Apache-2.0 */
++/* Candidate bridge, not a qualified binary. No retained JNIEnv or naked
++ * cross-process descriptor. Callback must synchronously protect borrowed fd. */
++#include <jni.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <pthread.h>
++#include <fcntl.h>
++#include <unistd.h>
++#include <limits.h>
++
++extern int pandoraAwgBegin(uint64_t, int, char *);
++extern uint64_t pandoraAwgStatus(uint64_t);
++extern void pandoraAwgRequestStop(uint64_t);
++extern int pandoraAwgRelease(uint64_t);
++
++struct protection_context {
++    uint64_t token;
++    JavaVM *vm;
++    jobject callback; /* global ref, retained through full native completion */
++    jmethodID protect;
++    unsigned int inflight;
++};
++static pthread_mutex_t protection_lock = PTHREAD_MUTEX_INITIALIZER;
++static struct protection_context *active_context;
++static uint64_t next_token = 1; /* Never reused in this process. Exhaustion fails. */
++
++static void clear_exception(JNIEnv *env) {
++    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
++}
++
++int pandora_protect_socket(uint64_t token, int fd) {
++    struct protection_context *ctx;
++    pthread_mutex_lock(&protection_lock);
++    ctx = active_context;
++    if (!ctx || ctx->token != token || fd < 0) {
++        pthread_mutex_unlock(&protection_lock);
++        return 0;
++    }
++    ++ctx->inflight;
++    pthread_mutex_unlock(&protection_lock);
++
++    JNIEnv *env = NULL;
++    int attached = 0, ok = 0;
++    jint result = (*ctx->vm)->GetEnv(ctx->vm, (void **)&env, JNI_VERSION_1_6);
++    if (result == JNI_EDETACHED) {
++        if ((*ctx->vm)->AttachCurrentThread(ctx->vm, &env, NULL) != JNI_OK) goto finished;
++        attached = 1;
++    } else if (result != JNI_OK) goto finished;
++    if ((*env)->ExceptionCheck(env)) { clear_exception(env); goto detach; }
++    ok = (*env)->CallBooleanMethod(env, ctx->callback, ctx->protect, (jint)fd) == JNI_TRUE;
++    if ((*env)->ExceptionCheck(env)) { clear_exception(env); ok = 0; }
++detach:
++    if (attached && (*ctx->vm)->DetachCurrentThread(ctx->vm) != JNI_OK) ok = 0;
++finished:
++    pthread_mutex_lock(&protection_lock);
++    --ctx->inflight;
++    pthread_mutex_unlock(&protection_lock);
++    return ok;
++}
++
++JNIEXPORT jlong JNICALL Java_org_pandora_nativebridge_ProtectedAwgNative_nativeBegin(
++        JNIEnv *env, jclass ignored, jint borrowed_tun_fd, jstring settings, jobject protector) {
++    (void)ignored;
++    if (borrowed_tun_fd < 0 || !settings || !protector) return 0;
++    if ((*env)->GetStringUTFLength(env, settings) > 262144) return 0;
++    pthread_mutex_lock(&protection_lock);
++    if (active_context || next_token > INT64_MAX) { pthread_mutex_unlock(&protection_lock); return 0; }
++    struct protection_context *ctx = calloc(1, sizeof(*ctx));
++    if (!ctx) { pthread_mutex_unlock(&protection_lock); return 0; }
++    int owned_fd = -1;
++    const char *config = NULL;
++    jclass callback_class = NULL;
++    if ((*env)->GetJavaVM(env, &ctx->vm) != JNI_OK) goto failed;
++    callback_class = (*env)->GetObjectClass(env, protector);
++    if (!callback_class) goto failed;
++    ctx->protect = (*env)->GetMethodID(env, callback_class, "protect", "(I)Z");
++    (*env)->DeleteLocalRef(env, callback_class);
++    callback_class = NULL;
++    if (!ctx->protect || (*env)->ExceptionCheck(env)) goto failed;
++    ctx->callback = (*env)->NewGlobalRef(env, protector);
++    if (!ctx->callback) goto failed;
++    config = (*env)->GetStringUTFChars(env, settings, NULL);
++    if (!config) goto failed;
++    /* JNI is modified UTF-8. This entry accepts ASCII UAPI only, so bytes
++     * are unambiguous; reject NUL/non-ASCII instead of silently transcoding. */
++    jsize config_length = (*env)->GetStringUTFLength(env, settings);
++    for (jsize i = 0; i < config_length; ++i) {
++        unsigned char ch = (unsigned char)config[i];
++        if (ch > 127 || (ch < 32 && ch != '\n' && ch != '\r' && ch != '\t')) goto failed;
++    }
++    /* Owner's original descriptor stays open. Transfer this duplicate only. */
++    owned_fd = fcntl(borrowed_tun_fd, F_DUPFD_CLOEXEC, 0);
++    if (owned_fd < 0) goto failed;
++    ctx->token = next_token++;
++    active_context = ctx;
++    /* Begin only reserves/copies arguments and launches a Go worker; it must
++     * not synchronously invoke the Java protector while this lock is held. */
++    int accepted = pandoraAwgBegin(ctx->token, owned_fd, (char *)config);
++    (*env)->ReleaseStringUTFChars(env, settings, config);
++    config = NULL;
++    if (accepted != 0) { active_context = NULL; goto failed; }
++    owned_fd = -1; /* Go worker is now the sole owner, including failure paths. */
++    jlong token = (jlong)ctx->token;
++    pthread_mutex_unlock(&protection_lock);
++    return token;
++failed:
++    clear_exception(env);
++    if (config) (*env)->ReleaseStringUTFChars(env, settings, config);
++    if (callback_class) (*env)->DeleteLocalRef(env, callback_class);
++    if (owned_fd >= 0) close(owned_fd);
++    if (ctx->callback) (*env)->DeleteGlobalRef(env, ctx->callback);
++    free(ctx);
++    pthread_mutex_unlock(&protection_lock);
++    return 0;
++}
++
++JNIEXPORT jlong JNICALL Java_org_pandora_nativebridge_ProtectedAwgNative_nativeStatus(
++        JNIEnv *env, jclass ignored, jlong token) {
++    (void)env; (void)ignored;
++    if (token <= 0) return 0;
++    uint64_t value = pandoraAwgStatus((uint64_t)token);
++    pthread_mutex_lock(&protection_lock);
++    struct protection_context *ctx = active_context;
++    if (!ctx || ctx->token != (uint64_t)token) value = 0;
++    else if ((value >> 32) == 4 && ctx->inflight != 0)
++        value = ((uint64_t)3 << 32) | (value & UINT32_MAX);
++    pthread_mutex_unlock(&protection_lock);
++    return (jlong)value;
++}
++
++JNIEXPORT void JNICALL Java_org_pandora_nativebridge_ProtectedAwgNative_nativeRequestStop(
++        JNIEnv *env, jclass ignored, jlong token) {
++    (void)env; (void)ignored;
++    if (token > 0) pandoraAwgRequestStop((uint64_t)token);
++}
++
++JNIEXPORT jboolean JNICALL Java_org_pandora_nativebridge_ProtectedAwgNative_nativeReleaseStopped(
++        JNIEnv *env, jclass ignored, jlong token) {
++    (void)ignored;
++    if (token <= 0) return JNI_FALSE;
++    /* No JNI callback can begin again once Go reports true completion.
++     * Do not hold the C mutex while waiting for Go/device shutdown. */
++    uint64_t value = pandoraAwgStatus((uint64_t)token);
++    if ((value >> 32) != 4) return JNI_FALSE;
++    pthread_mutex_lock(&protection_lock);
++    struct protection_context *ctx = active_context;
++    if (!ctx || ctx->token != (uint64_t)token || ctx->inflight != 0) {
++        pthread_mutex_unlock(&protection_lock); return JNI_FALSE;
++    }
++    if (!pandoraAwgRelease((uint64_t)token)) {
++        pthread_mutex_unlock(&protection_lock); return JNI_FALSE;
++    }
++    active_context = NULL;
++    (*env)->DeleteGlobalRef(env, ctx->callback);
++    free(ctx);
++    pthread_mutex_unlock(&protection_lock);
++    return JNI_TRUE;
++}
+diff --git a/candidate/amneziawg-android/tunnel/tools/libwg-go/pandora-protected.go b/candidate/amneziawg-android/tunnel/tools/libwg-go/pandora-protected.go
+new file mode 100644
+index 0000000..fdb2b16
+--- /dev/null
++++ b/candidate/amneziawg-android/tunnel/tools/libwg-go/pandora-protected.go
+@@ -0,0 +1,262 @@
++// SPDX-License-Identifier: Apache-2.0
++// PANDORA candidate; NOT_QUALIFIED until Go/JNI/Android execution evidence.
++package main
++
++/*
++#include <stdint.h>
++extern int pandora_protect_socket(uint64_t token, int fd);
++*/
++import "C"
++
++import (
++	"errors"
++	"sync"
++	"syscall"
++
++	"github.com/amnezia-vpn/amneziawg-go/v3/conn"
++	"github.com/amnezia-vpn/amneziawg-go/v3/device"
++	"github.com/amnezia-vpn/amneziawg-go/v3/tun"
++)
++
++const (
++	pUnknown = 0
++	pStarting = 1
++	pRunning = 2
++	pStopping = 3
++	pStopped = 4
++)
++const (
++	pOK = 0
++	pCancelled = 1
++	pTunFailed = 2
++	pConfigFailed = 3
++	pProtectFailed = 4
++	pUpFailed = 5
++	pInternalFailed = 6
++	pCleanupUnknown = 7
++)
++
++// Upstream Device.Close discards its TUN Close error. Preserve the FIRST
++// outcome instead of retrying Close (NativeTun has a sync.Once).
++type trackedTUN struct {
++	tun.Device
++	once sync.Once
++	closed chan struct{}
++	known bool
++	err error
++}
++func newTrackedTUN(td tun.Device) *trackedTUN { return &trackedTUN{Device: td, closed: make(chan struct{})} }
++func (t *trackedTUN) Close() error {
++	t.once.Do(func() {
++		defer close(t.closed)
++		t.err = t.Device.Close()
++		t.known = true
++	})
++	return t.err
++}
++func (t *trackedTUN) cleanupConfirmed() bool {
++	select { case <-t.closed: return t.known && t.err == nil; default: return false }
++}
++
++type protectedContext struct {
++	token uint64
++	mu sync.Mutex
++	state int
++	reason int
++	stop chan struct{}
++	stopOnce sync.Once
++	done chan struct{}
++	// Quarantine keeps ownership reachable even if the worker panics or
++	// cleanup cannot be proven. Only the worker attempts cleanup, once.
++	ownedFD int
++	fdPhase string
++	ownedTUN *trackedTUN
++	ownedDevice interface { Close(); Wait() chan struct{} }
++	ownedBind interface { Close() error; CloseFailure() error }
++	constructionCleanupKnown bool
++	quarantined bool
++}
++
++var protectedRegistry struct {
++	sync.Mutex
++	active *protectedContext
++}
++
++func (c *protectedContext) stopping() bool {
++	select { case <-c.stop: return true; default: return false }
++}
++
++func (c *protectedContext) requestStop() {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if c.state == pStopped { return }
++	if c.reason == pOK { c.reason = pCancelled }
++	c.stopOnce.Do(func() { close(c.stop) })
++	c.state = pStopping
++}
++
++func (c *protectedContext) tryRunning() bool {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if c.stopping() || c.state != pStarting { return false }
++	c.state = pRunning
++	return true
++}
++
++func (c *protectedContext) protect(_ string, _ string, raw syscall.RawConn) error {
++	if c.stopping() { return errors.New("cancelled") }
++	ok := false
++	err := raw.Control(func(fd uintptr) {
++		if !c.stopping() { ok = C.pandora_protect_socket(C.uint64_t(c.token), C.int(fd)) == 1 }
++	})
++	if err != nil || !ok || c.stopping() {
++		if !c.stopping() { c.fail(pProtectFailed) }
++		return errors.New("socket protection unavailable")
++	}
++	return nil
++}
++
++// cleanupOwned runs once on the worker's defer, with no context mutex held
++// across Close/Wait. A blocked close keeps this owner alive. A panic leaves
++// reachable quarantine references and does not produce completion proof.
++func attemptOwnedCleanup(action func() error) (err error) {
++	defer func() { if recover() != nil { err = errors.New("cleanup panicked") } }()
++	return action()
++}
++
++func (c *protectedContext) cleanupOwned() (known bool) {
++	c.mu.Lock()
++	dev, td, b := c.ownedDevice, c.ownedTUN, c.ownedBind
++	known = c.constructionCleanupKnown
++	c.mu.Unlock()
++	ownersKnown := true
++	if dev != nil {
++		if err := attemptOwnedCleanup(func() error { dev.Close(); <-dev.Wait(); return nil }); err != nil {
++			ownersKnown = false
++			// Device.Close panicked; still attempt known bind/TUN owners,
++			// retaining the device ref and UNKNOWN disposition afterwards.
++			if b != nil { attemptOwnedCleanup(b.Close) }
++			if td != nil { attemptOwnedCleanup(td.Close) }
++		}
++	} else {
++		if b != nil { if err := attemptOwnedCleanup(b.Close); err != nil { ownersKnown = false } }
++		if td != nil { if err := attemptOwnedCleanup(td.Close); err != nil { ownersKnown = false } }
++	}
++	if td != nil { known = td.cleanupConfirmed() }
++	if b != nil && b.CloseFailure() != nil { known = false }
++	return known && ownersKnown
++}
++
++func (c *protectedContext) finishAfterRun(panicked bool) {
++	if panicked {
++		c.mu.Lock(); c.quarantined = true; c.mu.Unlock()
++		c.fail(pInternalFailed)
++	}
++	// A recovered run panic must still attempt Close on the known live owner.
++	// Even if that attempt returns cleanly, panic disposition remains UNKNOWN.
++	known := c.cleanupOwned()
++	if !known || panicked {
++		c.mu.Lock(); c.quarantined = true; c.mu.Unlock()
++		c.fail(pCleanupUnknown)
++		return
++	}
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if c.quarantined || c.state == pStopped { return }
++	if c.stopping() && c.reason == pOK { c.reason = pCancelled }
++	c.fdPhase = "CLOSED_CONFIRMED"
++	c.state = pStopped
++	close(c.done)
++}
++
++// Only this worker owns cleanup. Context retains each owner before operations
++// capable of failing after a device has started; no other goroutine retries it.
++func (c *protectedContext) run(fd int, settings string) {
++	defer func() { c.finishAfterRun(recover() != nil) }()
++	c.mu.Lock(); c.fdPhase = "CONSUMING"; c.mu.Unlock()
++	rawTUN, _, err := tun.ConsumeUnmonitoredTUNFromFD(fd)
++	if err != nil {
++		c.mu.Lock()
++		c.constructionCleanupKnown = tun.OwnedTUNFailureCleanupConfirmed(err)
++		c.fdPhase = "CONSUME_FAILED"
++		c.mu.Unlock()
++		c.fail(pTunFailed)
++		return
++	}
++	td := newTrackedTUN(rawTUN)
++	c.mu.Lock(); c.ownedTUN = td; c.fdPhase = "TUN_OWNED"; c.mu.Unlock()
++	if c.stopping() { return }
++	b, err := conn.NewStdNetBindWithSocketControl(c.protect)
++	if err != nil { c.fail(pProtectFailed); return }
++	c.mu.Lock(); c.ownedBind = b.(interface { Close() error; CloseFailure() error }); c.mu.Unlock()
++	logger := &device.Logger{Verbosef: func(string, ...interface{}) {}, Errorf: func(string, ...interface{}) {}}
++	dev := device.NewDevice(td, b, logger)
++	c.mu.Lock(); c.ownedDevice = dev; c.mu.Unlock()
++	if err = dev.IpcSet(settings); err != nil { c.fail(pConfigFailed); return }
++	if c.stopping() { return }
++	dev.DisableSomeRoamingForBrokenMobileSemantics()
++	if err = dev.Up(); err != nil { c.fail(pUpFailed); return }
++	if !c.tryRunning() { return }
++	<-c.stop
++}
++
++func (c *protectedContext) fail(reason int) {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if c.state == pStopped { return }
++	if c.reason == pOK { c.reason = reason }
++	// Wake the worker on a RUNNING rebind failure, but never synchronously
++	// Close from inside a socket control callback (would invert bind locks).
++	c.stopOnce.Do(func() { close(c.stop) })
++	c.state = pStopping
++}
++
++//export pandoraAwgBegin
++func pandoraAwgBegin(token C.uint64_t, fd C.int, settings *C.char) C.int {
++	if token == 0 || fd < 0 || settings == nil { return -1 }
++	protectedRegistry.Lock()
++	defer protectedRegistry.Unlock()
++	if protectedRegistry.active != nil { return -1 }
++	c := &protectedContext{token: uint64(token), state: pStarting, stop: make(chan struct{}), done: make(chan struct{}), ownedFD: int(fd), fdPhase: "ACCEPTED"}
++	config := C.GoString(settings) // Copy synchronously before JNI releases UTF chars.
++	protectedRegistry.active = c
++	go c.run(int(fd), config)
++	return 0 // fd ownership transferred; NO claim that Up has completed.
++}
++
++func findProtected(token uint64) *protectedContext {
++	protectedRegistry.Lock()
++	defer protectedRegistry.Unlock()
++	c := protectedRegistry.active
++	if c == nil || c.token != token { return nil }
++	return c
++}
++
++//export pandoraAwgStatus
++func pandoraAwgStatus(token C.uint64_t) C.uint64_t {
++	c := findProtected(uint64(token))
++	if c == nil { return 0 }
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	return C.uint64_t(uint64(c.state)<<32 | uint64(c.reason))
++}
++
++//export pandoraAwgRequestStop
++func pandoraAwgRequestStop(token C.uint64_t) {
++	if c := findProtected(uint64(token)); c != nil { c.requestStop() }
++}
++
++//export pandoraAwgRelease
++func pandoraAwgRelease(token C.uint64_t) C.int {
++	protectedRegistry.Lock()
++	defer protectedRegistry.Unlock()
++	c := protectedRegistry.active
++	if c == nil || c.token != uint64(token) { return 0 }
++	select {
++	case <-c.done:
++		protectedRegistry.active = nil
++		return 1
++	default:
++		return 0
++	}
++}
+diff --git a/candidate/amneziawg-android/tunnel/tools/libwg-go/pandora-protected_test.go b/candidate/amneziawg-android/tunnel/tools/libwg-go/pandora-protected_test.go
+new file mode 100644
+index 0000000..fb3a6c1
+--- /dev/null
++++ b/candidate/amneziawg-android/tunnel/tools/libwg-go/pandora-protected_test.go
+@@ -0,0 +1,120 @@
++// SPDX-License-Identifier: Apache-2.0
++// Native package tests: NOT_RUN without the audited Android/cgo toolchain.
++package main
++
++import (
++	"errors"
++	"sync"
++	"syscall"
++	"testing"
++
++	"github.com/amnezia-vpn/amneziawg-go/v3/tun"
++)
++
++func testProtectedContext(token uint64) *protectedContext {
++	return &protectedContext{token: token, state: pStarting, stop: make(chan struct{}), done: make(chan struct{})}
++}
++
++func TestProtectedStopBeforeUpNeverBecomesRunning(t *testing.T) {
++	c := testProtectedContext(1)
++	c.requestStop()
++	if c.tryRunning() || c.state != pStopping { t.Fatal("late Up revived cancelled start") }
++}
++
++func TestProtectedConcurrentStopIsIdempotent(t *testing.T) {
++	c := testProtectedContext(2)
++	var wg sync.WaitGroup
++	for i := 0; i < 8; i++ { wg.Add(1); go func() { defer wg.Done(); c.requestStop() }() }
++	wg.Wait()
++	if !c.stopping() || c.state != pStopping { t.Fatal("stop did not latch") }
++}
++
++func TestProtectedRunningDoesNotClearStop(t *testing.T) {
++	c := testProtectedContext(3)
++	if !c.tryRunning() { t.Fatal("start transition rejected") }
++	c.requestStop()
++	if c.tryRunning() || !c.stopping() { t.Fatal("cancelled core became running") }
++}
++
++func TestProtectedReleaseRequiresActualCompletion(t *testing.T) {
++	c := testProtectedContext(99)
++	protectedRegistry.Lock(); protectedRegistry.active = c; protectedRegistry.Unlock()
++	t.Cleanup(func() { protectedRegistry.Lock(); protectedRegistry.active = nil; protectedRegistry.Unlock() })
++	c.requestStop()
++	if pandoraAwgRelease(99) != 0 || findProtected(99) == nil { t.Fatal("released pending cleanup") }
++	c.mu.Lock(); c.state = pStopped; close(c.done); c.mu.Unlock()
++	if pandoraAwgRelease(99) != 1 || findProtected(99) != nil { t.Fatal("completed context not released") }
++}
++
++type countedRaw struct { controls int }
++func (r *countedRaw) Control(fn func(uintptr)) error { r.controls++; fn(123); return nil }
++func (*countedRaw) Read(func(uintptr) bool) error { return syscall.EINVAL }
++func (*countedRaw) Write(func(uintptr) bool) error { return syscall.EINVAL }
++
++func TestProtectedCancelledCallbackDoesNotBorrowFD(t *testing.T) {
++	c := testProtectedContext(4)
++	c.requestStop()
++	raw := &countedRaw{}
++	if c.protect("udp4", ":0", raw) == nil || raw.controls != 0 { t.Fatal("cancelled callback reached fd") }
++}
++
++func TestProtectedFirstFailureReasonPersists(t *testing.T) {
++	c := testProtectedContext(5)
++	c.fail(pProtectFailed)
++	c.fail(pUpFailed)
++	if c.reason != pProtectFailed { t.Fatal("first cause overwritten") }
++}
++
++func TestProtectedRunningFailureWakesStopWithoutInlineClose(t *testing.T) {
++	c := testProtectedContext(6)
++	if !c.tryRunning() { t.Fatal("start failed") }
++	c.fail(pProtectFailed)
++	select { case <-c.stop: default: t.Fatal("rebind failure did not wake worker") }
++	if c.state != pStopping || c.reason != pProtectFailed { t.Fatal("failure still looked running") }
++}
++
++type fakeCloseTUN struct { tun.Device; calls int; err error }
++func (t *fakeCloseTUN) Close() error { t.calls++; return t.err }
++func TestTrackedTUNPreservesFirstCloseFailure(t *testing.T) {
++	base := &fakeCloseTUN{err: errors.New("close failed")}
++	tracked := newTrackedTUN(base)
++	tracked.Close(); tracked.Close()
++	if base.calls != 1 || tracked.cleanupConfirmed() { t.Fatal("close failure erased by retry") }
++}
++func TestTrackedTUNRequiresActualCloseBeforeConfirmation(t *testing.T) {
++	tracked := newTrackedTUN(&fakeCloseTUN{})
++	if tracked.cleanupConfirmed() { t.Fatal("unclosed owner claimed clean") }
++	tracked.Close()
++	if !tracked.cleanupConfirmed() { t.Fatal("successful close missing") }
++}
++
++type fakeOwnedDevice struct { closed chan struct{}; calls int; panicClose bool }
++func (d *fakeOwnedDevice) Close() { d.calls++; if d.panicClose { panic("dummy close failure") }; close(d.closed) }
++func (d *fakeOwnedDevice) Wait() chan struct{} { return d.closed }
++
++func TestRecoveredLiveDevicePanicStillAttemptsOwnedCleanup(t *testing.T) {
++	c := testProtectedContext(7)
++	dev := &fakeOwnedDevice{closed: make(chan struct{})}
++	tdBase := &fakeCloseTUN{}
++	c.ownedDevice = dev
++	c.ownedTUN = newTrackedTUN(tdBase)
++	// Fake device has no real TUN: Close is independently recorded below.
++	// For a real device it calls trackedTUN.Close as part of upstream Close.
++	c.ownedTUN.Close()
++	c.finishAfterRun(true)
++	if dev.calls != 1 || !c.quarantined || c.state != pStopping { t.Fatal("panic skipped live owner cleanup") }
++	if c.ownedDevice != dev || c.ownedTUN == nil { t.Fatal("quarantine ownership lost") }
++	select { case <-c.done: t.Fatal("panic fabricated completion proof"); default: }
++}
++
++func TestDeviceClosePanicRetainsDeviceAndClosesKnownTUN(t *testing.T) {
++	c := testProtectedContext(8)
++	dev := &fakeOwnedDevice{closed: make(chan struct{}), panicClose: true}
++	base := &fakeCloseTUN{}
++	c.ownedDevice = dev
++	c.ownedTUN = newTrackedTUN(base)
++	c.finishAfterRun(false)
++	if dev.calls != 1 || base.calls != 1 || c.ownedDevice != dev || !c.quarantined { t.Fatal("panic owner not retained/closed safely") }
++	if c.state != pStopping { t.Fatal("cleanup panic reported stopped") }
++	select { case <-c.done: t.Fatal("cleanup panic fabricated completion"); default: }
++}

@@ -1,0 +1,328 @@
+diff --git a/baseline/amneziawg-go/conn/bind_std.go b/candidate/amneziawg-go/conn/bind_std.go
+index 6908ba8..55822bc 100644
+--- a/baseline/amneziawg-go/conn/bind_std.go
++++ b/candidate/amneziawg-go/conn/bind_std.go
+@@ -44,6 +44,10 @@ type StdNetBind struct {
+ 	udpAddrPool sync.Pool
+ 	msgsPool    sync.Pool
+ 
++	// socketControl is immutable after construction; nil preserves legacy behavior.
++	socketControl func(string, string, syscall.RawConn) error
++	closeFailure error // sticky: ignored upstream Close errors must remain observable
++
+ 	blackhole4 bool
+ 	blackhole6 bool
+ }
+@@ -119,8 +123,18 @@ func (e *StdNetEndpoint) DstToString() string {
+ 	return e.AddrPort.String()
+ }
+ 
++// Preserve the upstream package helper for existing same-package callers/tests.
++// Protected Open uses the receiver method below, never this legacy helper.
+ func listenNet(network string, port int) (*net.UDPConn, int, error) {
+-	conn, err := listenConfig().ListenPacket(context.Background(), network, ":"+strconv.Itoa(port))
++	return (&StdNetBind{}).listenNet(network, port)
++}
++
++func (s *StdNetBind) listenNet(network string, port int) (*net.UDPConn, int, error) {
++	lc := listenConfig()
++	if s.socketControl != nil {
++		lc = withSocketControl(lc, s.socketControl)
++	}
++	conn, err := lc.ListenPacket(context.Background(), network, ":"+strconv.Itoa(port))
+ 	if err != nil {
+ 		return nil, 0, err
+ 	}
+@@ -132,6 +146,7 @@ func listenNet(network string, port int) (*net.UDPConn, int, error) {
+ 		laddr.String(),
+ 	)
+ 	if err != nil {
++		s.rememberCloseError(conn.Close())
+ 		return nil, 0, err
+ 	}
+ 	return conn.(*net.UDPConn), uaddr.Port, nil
+@@ -156,20 +171,24 @@ again:
+ 	var v4pc *ipv4.PacketConn
+ 	var v6pc *ipv6.PacketConn
+ 
+-	v4conn, port, err = listenNet("udp4", port)
++	v4conn, port, err = s.listenNet("udp4", port)
+ 	if err != nil && !errors.Is(err, syscall.EAFNOSUPPORT) {
+ 		return nil, 0, err
+ 	}
+ 
+ 	// Listen on the same port as we're using for ipv4.
+-	v6conn, port, err = listenNet("udp6", port)
++	v6conn, port, err = s.listenNet("udp6", port)
+ 	if uport == 0 && errors.Is(err, syscall.EADDRINUSE) && tries < 100 {
+-		v4conn.Close()
++		if v4conn != nil {
++			s.rememberCloseError(v4conn.Close())
++		}
+ 		tries++
+ 		goto again
+ 	}
+ 	if err != nil && !errors.Is(err, syscall.EAFNOSUPPORT) {
+-		v4conn.Close()
++		if v4conn != nil {
++			s.rememberCloseError(v4conn.Close())
++		}
+ 		return nil, 0, err
+ 	}
+ 	var fns []ReceiveFunc
+@@ -320,8 +339,11 @@ func (s *StdNetBind) Close() error {
+ 	s.ipv6TxOffload = false
+ 	s.ipv6RxOffload = false
+ 	if err1 != nil {
++		s.rememberCloseError(err1)
++		s.rememberCloseError(err2)
+ 		return err1
+ 	}
++	s.rememberCloseError(err2)
+ 	return err2
+ }
+ 
+diff --git a/candidate/amneziawg-go/conn/protected_bind.go b/candidate/amneziawg-go/conn/protected_bind.go
+new file mode 100644
+index 0000000..eea3097
+--- /dev/null
++++ b/candidate/amneziawg-go/conn/protected_bind.go
+@@ -0,0 +1,55 @@
++// SPDX-License-Identifier: MIT
++// PANDORA candidate: per-instance socket control, not Android qualification.
++package conn
++
++import (
++	"errors"
++	"net"
++	"syscall"
++)
++
++// Caller holds s.mu (Open/Close). Never clear a previous uncertain close.
++func (s *StdNetBind) rememberCloseError(err error) {
++	if s.closeFailure == nil && err != nil { s.closeFailure = err }
++}
++func (s *StdNetBind) CloseFailure() error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	return s.closeFailure
++}
++
++// NewStdNetBindWithSocketControl requires a synchronous, non-reentrant control.
++// The callback runs before bind for EVERY socket created by this bind instance.
++// It borrows RawConn only for the duration of this call; it must not close it.
++// Missing/failed protection is fatal; never fall back to NewStdNetBind.
++func NewStdNetBindWithSocketControl(control func(string, string, syscall.RawConn) error) (Bind, error) {
++	if control == nil {
++		return nil, errors.New("socket protection callback required")
++	}
++	b := NewStdNetBind().(*StdNetBind)
++	b.socketControl = control
++	return b, nil
++}
++
++func withSocketControl(base *net.ListenConfig, protect func(string, string, syscall.RawConn) error) *net.ListenConfig {
++	lc := *base
++	prior := base.Control
++	lc.Control = func(network, address string, raw syscall.RawConn) error {
++		if prior != nil {
++			if err := prior(network, address, raw); err != nil {
++				return err
++			}
++		}
++		if protect == nil {
++			return errors.New("socket protection callback missing")
++		}
++		if err := protect(network, address, raw); err != nil {
++			// Deliberately do NOT wrap: callback EAFNOSUPPORT/EADDRINUSE must
++			// not become an optional-family skip or the Open retry condition.
++			// Do not leak callback/JNI exception details into core logs.
++			return errors.New("socket protection failed")
++		}
++		return nil
++	}
++	return &lc
++}
+diff --git a/candidate/amneziawg-go/conn/protected_bind_test.go b/candidate/amneziawg-go/conn/protected_bind_test.go
+new file mode 100644
+index 0000000..d1983b2
+--- /dev/null
++++ b/candidate/amneziawg-go/conn/protected_bind_test.go
+@@ -0,0 +1,95 @@
++// SPDX-License-Identifier: MIT
++package conn
++
++import (
++	"errors"
++	"net"
++	"reflect"
++	"syscall"
++	"testing"
++)
++
++func TestProtectedBindMissingCallback(t *testing.T) {
++	if b, err := NewStdNetBindWithSocketControl(nil); err == nil || b != nil {
++		t.Fatal("missing callback accepted")
++	}
++}
++
++func TestSocketControlOrderAndPerInstance(t *testing.T) {
++	var calls []string
++	base := &net.ListenConfig{Control: func(string, string, syscall.RawConn) error {
++		calls = append(calls, "platform")
++		return nil
++	}}
++	lc := withSocketControl(base, func(string, string, syscall.RawConn) error {
++		calls = append(calls, "protect")
++		return nil
++	})
++	if err := lc.Control("udp4", ":0", nil); err != nil { t.Fatal(err) }
++	if !reflect.DeepEqual(calls, []string{"platform", "protect"}) { t.Fatal(calls) }
++	calls = nil
++	if err := base.Control("udp4", ":0", nil); err != nil { t.Fatal(err) }
++	if !reflect.DeepEqual(calls, []string{"platform"}) { t.Fatal("global config mutated") }
++}
++
++func TestProtectionErrorCannotMasqueradeAsOptionalFamily(t *testing.T) {
++	lc := withSocketControl(&net.ListenConfig{}, func(string, string, syscall.RawConn) error {
++		return syscall.EAFNOSUPPORT
++	})
++	err := lc.Control("udp6", ":0", nil)
++	if err == nil || errors.Is(err, syscall.EAFNOSUPPORT) { t.Fatal("callback failure bypassable", err) }
++}
++
++// These tests use real LOCAL UDP sockets only; they send no datagrams.
++// They are NOT Android/native/protect tests and are NOT_RUN in this package.
++func TestBindProtectFailureLeavesNoSockets(t *testing.T) {
++	b0, err := NewStdNetBindWithSocketControl(func(string, string, syscall.RawConn) error {
++		return errors.New("denied")
++	})
++	if err != nil { t.Fatal(err) }
++	b := b0.(*StdNetBind)
++	defer b.Close()
++	if _, _, err = b.Open(0); err == nil { t.Fatal("Open succeeded without protection") }
++	if b.ipv4 != nil || b.ipv6 != nil { t.Fatal("socket retained after failure") }
++}
++
++func TestBindReopenProtectsAgain(t *testing.T) {
++	calls := 0
++	b, err := NewStdNetBindWithSocketControl(func(string, string, syscall.RawConn) error {
++		calls++
++		return nil
++	})
++	if err != nil { t.Fatal(err) }
++	defer b.Close()
++	if _, _, err = b.Open(0); err != nil { t.Fatal(err) }
++	first := calls
++	if first == 0 { t.Fatal("callback absent on first open") }
++	if err = b.Close(); err != nil { t.Fatal(err) }
++	if _, _, err = b.Open(0); err != nil { t.Fatal(err) }
++	if calls <= first { t.Fatal("reopen reused old protection") }
++}
++
++func TestSecondFamilyProtectFailureClosesFirst(t *testing.T) {
++	seen4 := false
++	b0, err := NewStdNetBindWithSocketControl(func(network, _ string, _ syscall.RawConn) error {
++		if network == "udp4" { seen4 = true; return nil }
++		return errors.New("second family denied")
++	})
++	if err != nil { t.Fatal(err) }
++	b := b0.(*StdNetBind)
++	defer b.Close()
++	if _, _, err = b.Open(0); err == nil { t.Fatal("second family failure accepted") }
++	if !seen4 { t.Fatal("test platform did not exercise first family") }
++	if b.ipv4 != nil || b.ipv6 != nil { t.Fatal("partial socket publication") }
++}
++
++func TestBindCloseFailureSurvivesSecondClose(t *testing.T) {
++	sock, err := net.ListenUDP("udp4", &net.UDPAddr{})
++	if err != nil { t.Fatal(err) }
++	b := NewStdNetBind().(*StdNetBind)
++	b.ipv4 = sock
++	if err = sock.Close(); err != nil { t.Fatal(err) }
++	if b.Close() == nil { t.Fatal("uncertain close not surfaced") }
++	b.Close()
++	if b.CloseFailure() == nil { t.Fatal("second close erased failure") }
++}
+diff --git a/candidate/amneziawg-go/tun/tun_owned_linux.go b/candidate/amneziawg-go/tun/tun_owned_linux.go
+new file mode 100644
+index 0000000..a223dfb
+--- /dev/null
++++ b/candidate/amneziawg-go/tun/tun_owned_linux.go
+@@ -0,0 +1,48 @@
++// SPDX-License-Identifier: MIT
++// Derived from the pinned tun_linux.go constructor; ownership is explicit.
++// Copyright (C) 2017-2025 WireGuard LLC. All Rights Reserved.
++package tun
++
++import (
++	"errors"
++	"os"
++
++	"github.com/amnezia-vpn/amneziawg-go/v3/conn"
++	"golang.org/x/sys/unix"
++)
++
++type ownedTUNCreateError struct { cause error; cleanup error }
++func (e *ownedTUNCreateError) Error() string { return "owned TUN creation failed" }
++func (e *ownedTUNCreateError) Unwrap() error { return e.cause }
++
++// Missing/foreign error types provide no proof of owned-descriptor cleanup.
++func OwnedTUNFailureCleanupConfirmed(err error) bool {
++	var failure *ownedTUNCreateError
++	return errors.As(err, &failure) && failure.cleanup == nil
++}
++
++// ConsumeUnmonitoredTUNFromFD consumes fd on BOTH success and failure.
++// The caller must transfer a dedicated duplicate, never the VPN owner's fd.
++func ConsumeUnmonitoredTUNFromFD(fd int) (Device, string, error) {
++	if err := unix.SetNonblock(fd, true); err != nil {
++		closed := unix.Close(fd)
++		return nil, "", &ownedTUNCreateError{cause: err, cleanup: closed}
++	}
++	file := os.NewFile(uintptr(fd), "/dev/tun")
++	if file == nil {
++		closed := unix.Close(fd)
++		return nil, "", &ownedTUNCreateError{cause: errors.New("invalid owned TUN descriptor"), cleanup: closed}
++	}
++	t := &NativeTun{
++		tunFile: file,
++		events: make(chan Event, 5),
++		errors: make(chan error, 5),
++		tcpGROTable: newTCPGROTable(),
++		udpGROTable: newUDPGROTable(),
++		toWrite: make([]int, 0, conn.IdealBatchSize),
++	}
++	name, err := t.Name()
++	if err != nil { return nil, "", &ownedTUNCreateError{cause: err, cleanup: t.Close()} }
++	if err = t.initFromFlags(name); err != nil { return nil, "", &ownedTUNCreateError{cause: err, cleanup: t.Close()} }
++	return t, name, nil
++}
+diff --git a/candidate/amneziawg-go/tun/tun_owned_linux_test.go b/candidate/amneziawg-go/tun/tun_owned_linux_test.go
+new file mode 100644
+index 0000000..fc0693f
+--- /dev/null
++++ b/candidate/amneziawg-go/tun/tun_owned_linux_test.go
+@@ -0,0 +1,22 @@
++// SPDX-License-Identifier: MIT
++package tun
++
++import (
++	"os"
++	"testing"
++
++	"golang.org/x/sys/unix"
++)
++
++// A pipe is not a TUN: Name/ioctl must fail. The native duplicate is closed,
++// while the owner's separate fd remains usable. No VPN/device is created.
++func TestOwnedTUNFailureClosesDuplicateNotOwner(t *testing.T) {
++	r, w, err := os.Pipe()
++	if err != nil { t.Fatal(err) }
++	defer r.Close(); defer w.Close()
++	dup, err := unix.Dup(int(r.Fd()))
++	if err != nil { t.Fatal(err) }
++	if td, _, err := ConsumeUnmonitoredTUNFromFD(dup); err == nil || td != nil { t.Fatal("pipe accepted as TUN") }
++	if _, err = unix.FcntlInt(uintptr(dup), unix.F_GETFD, 0); err != unix.EBADF { t.Fatal("duplicate not closed", err) }
++	if _, err = unix.FcntlInt(r.Fd(), unix.F_GETFD, 0); err != nil { t.Fatal("owner fd was closed", err) }
++}
